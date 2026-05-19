@@ -1,0 +1,299 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Application stack for the internal issuer service. Deploys private API Gateway,
+  Lambda functions, and runtime IAM needed for the OIDC backend. Lambda package
+  paths are local build artifacts that aws cloudformation package rewrites into
+  artifact-bucket S3 references.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: internal-issuer
+  EnvironmentName:
+    Type: String
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  ExecuteApiVpcEndpointId:
+    Type: String
+  RevocationTableName:
+    Type: String
+  SigningKeyArn:
+    Type: String
+  KeyProviderSecretArn:
+    Type: String
+  LambdaRuntime:
+    Type: String
+    Default: python3.12
+  LambdaMemorySize:
+    Type: Number
+    Default: 512
+  LambdaTimeout:
+    Type: Number
+    Default: 20
+  LambdaSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+
+Resources:
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-runtime'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: logs-dynamo-kms-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${RevocationTableName}'
+              - Effect: Allow
+                Action:
+                  - kms:GetPublicKey
+                  - kms:Sign
+                  - kms:Verify
+                Resource: !Ref SigningKeyArn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref KeyProviderSecretArn
+
+  OidcApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-${EnvironmentName}-api'
+      RetentionInDays: 30
+
+  OidcApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${EnvironmentName}-api'
+      Runtime: !Ref LambdaRuntime
+      Handler: internal_oidc.adapters.aws_lambda.api.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroupId
+        SubnetIds: !Ref PrivateSubnetIds
+      Code: build/output/release/lambda/oidc-api.zip
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          REVOCATION_TABLE_NAME: !Ref RevocationTableName
+          KEY_PROVIDER_SECRET_ARN: !Ref KeyProviderSecretArn
+          SIGNING_KEY_ARN: !Ref SigningKeyArn
+          ISSUER_BASE_URL: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
+
+  RevokeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${EnvironmentName}-revoke'
+      Runtime: !Ref LambdaRuntime
+      Handler: internal_oidc.adapters.aws_lambda.revoke.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroupId
+        SubnetIds: !Ref PrivateSubnetIds
+      Code: build/output/release/lambda/revoke.zip
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+          REVOCATION_TABLE_NAME: !Ref RevocationTableName
+          KEY_PROVIDER_SECRET_ARN: !Ref KeyProviderSecretArn
+          SIGNING_KEY_ARN: !Ref SigningKeyArn
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${ProjectName}-${EnvironmentName}'
+      EndpointConfiguration:
+        Types: [PRIVATE]
+        VpcEndpointIds:
+          - !Ref ExecuteApiVpcEndpointId
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyRequestsOutsideVpcEndpoint
+            Effect: Deny
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:*'
+            Condition:
+              StringNotEquals:
+                aws:SourceVpce: !Ref ExecuteApiVpcEndpointId
+          - Sid: AllowRequestsFromVpcEndpoint
+            Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:*'
+
+  WellKnownResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: '.well-known'
+
+  OpenidConfigResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref WellKnownResource
+      PathPart: 'openid-configuration'
+
+  JwksResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'jwks'
+
+  RevokeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'revoke'
+
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: 'health'
+
+  OpenidConfigMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref OpenidConfigResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OidcApiFunction.Arn}/invocations'
+
+  JwksMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref JwksResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OidcApiFunction.Arn}/invocations'
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OidcApiFunction.Arn}/invocations'
+
+  RevokeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RevokeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RevokeFunction.Arn}/invocations'
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OidcApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/*'
+
+  RevokeInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RevokeFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/*'
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - OpenidConfigMethod
+      - JwksMethod
+      - HealthMethod
+      - RevokeMethod
+    Properties:
+      RestApiId: !Ref RestApi
+
+  Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref Deployment
+      StageName: !Ref EnvironmentName
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: 'OFF'
+          MetricsEnabled: true
+          DataTraceEnabled: false
+
+Outputs:
+  RestApiIdOutput:
+    Value: !Ref RestApi
+    Export:
+      Name: !Sub '${AWS::StackName}-RestApiId'
+
+  IssuerUrlOutput:
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-IssuerUrl'
+
+  OidcApiFunctionNameOutput:
+    Value: !Ref OidcApiFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-OidcApiFunctionName'
+
+  RevokeFunctionNameOutput:
+    Value: !Ref RevokeFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-RevokeFunctionName'

@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Reusable network stack for private API/Lambda deployments. Creates the
+  execute-api VPC endpoint and security groups exported for application stacks.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: internal-issuer
+  EnvironmentName:
+    Type: String
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  VpcCidr:
+    Type: String
+    Description: CIDR block for the VPC that contains approved internal callers.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  LambdaEgressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Egress CIDR for Lambda. Keep broad for first refactor; tighten later with endpoint-specific rules.
+
+Resources:
+  ApiEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${EnvironmentName} execute-api endpoint ingress'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: Approved internal callers to private execute-api endpoint
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Default egress for interface endpoint security group
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${EnvironmentName}-execute-api-endpoint-sg'
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${EnvironmentName} lambda runtime egress'
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref LambdaEgressCidr
+          Description: HTTPS egress for AWS service/API access
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${EnvironmentName}-lambda-sg'
+
+  ExecuteApiVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.execute-api'
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref ApiEndpointSecurityGroup
+      SubnetIds: !Ref PrivateSubnetIds
+
+Outputs:
+  VpcIdOutput:
+    Value: !Ref VpcId
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PrivateSubnetIdsOutput:
+    Value: !Join [',', !Ref PrivateSubnetIds]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetIds'
+
+  ExecuteApiVpcEndpointIdOutput:
+    Value: !Ref ExecuteApiVpcEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-ExecuteApiVpcEndpointId'
+
+  ApiEndpointSecurityGroupIdOutput:
+    Value: !Ref ApiEndpointSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpointSecurityGroupId'
+
+  LambdaSecurityGroupIdOutput:
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaSecurityGroupId'

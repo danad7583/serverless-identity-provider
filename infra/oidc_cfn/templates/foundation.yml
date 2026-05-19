@@ -1,0 +1,274 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Foundation stack for reusable CloudFormation/CodePipeline deployments. Creates
+  shared encrypted artifact storage, signing/runtime support resources, and log
+  groups for the internal issuer environment. Source handoff is handled by
+  CodePipeline source artifacts, not a separate staging bucket.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: internal-issuer
+    AllowedPattern: '^[a-z0-9-]+$'
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '^[a-z0-9-]+$'
+  ArtifactBucketName:
+    Type: String
+    Description: Versioned S3 bucket for CodePipeline artifacts, CloudFormation package uploads, and review snapshots.
+  SnapshotExpirationDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Number of days to retain review snapshots and packaged deployment artifacts.
+  EnableCloudTrailDataEvents:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true','false']
+  ExternalKeyProviderEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true','false']
+
+Conditions:
+  UseCloudTrailDataEvents: !Equals [!Ref EnableCloudTrailDataEvents, 'true']
+
+Resources:
+  ArtifactBucketKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub '${ProjectName}-${EnvironmentName} artifact bucket encryption key'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  ArtifactBucketKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${EnvironmentName}-artifact'
+      TargetKeyId: !Ref ArtifactBucketKey
+
+  LogsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub '${ProjectName}-${EnvironmentName} CloudWatch Logs encryption key'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogsService
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ProjectName}/${EnvironmentName}/audit'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ProjectName}/${EnvironmentName}/pipeline'
+          - Sid: AllowCallerViaCloudWatchLogs
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'logs.${AWS::Region}.amazonaws.com'
+
+  LogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${EnvironmentName}-logs'
+      TargetKeyId: !Ref LogsKey
+
+  SigningKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub '${ProjectName}-${EnvironmentName} JWT signing key'
+      EnableKeyRotation: false
+      KeySpec: ECC_NIST_P256
+      KeyUsage: SIGN_VERIFY
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  SigningKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${EnvironmentName}-signing'
+      TargetKeyId: !Ref SigningKey
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt ArtifactBucketKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireReviewSnapshots
+            Status: Enabled
+            Prefix: snapshots/
+            ExpirationInDays: !Ref SnapshotExpirationDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref SnapshotExpirationDays
+          - Id: ExpirePackagedArtifacts
+            Status: Enabled
+            Prefix: packaged/
+            ExpirationInDays: !Ref SnapshotExpirationDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref SnapshotExpirationDays
+          - Id: ExpirePipelineArtifacts
+            Status: Enabled
+            Prefix: !Sub '${ProjectName}-${EnvironmentName}-pipeline/'
+            ExpirationInDays: !Ref SnapshotExpirationDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref SnapshotExpirationDays
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  RevocationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-${EnvironmentName}-revocation'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jti
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jti
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  KeyProviderSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/${EnvironmentName}/key-provider'
+      Description: >
+        Configuration document that points the application at the active key
+        provider. KMS is primary in dev, while external providers can be wired
+        later without changing core service logic.
+      SecretString: !Sub |
+        {
+          "provider": "${AWS::Partition}:kms",
+          "external_provider_enabled": "${ExternalKeyProviderEnabled}",
+          "kms_key_arn": "${SigningKey.Arn}"
+        }
+
+  AuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/${ProjectName}/${EnvironmentName}/audit'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogsKey.Arn
+
+  PipelineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/${ProjectName}/${EnvironmentName}/pipeline'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogsKey.Arn
+
+Outputs:
+  ProjectNameOutput:
+    Value: !Ref ProjectName
+    Export:
+      Name: !Sub '${AWS::StackName}-ProjectName'
+
+  EnvironmentNameOutput:
+    Value: !Ref EnvironmentName
+    Export:
+      Name: !Sub '${AWS::StackName}-EnvironmentName'
+
+  ArtifactBucketNameOutput:
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucketName'
+
+  ArtifactBucketKeyArnOutput:
+    Value: !GetAtt ArtifactBucketKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucketKeyArn'
+
+  LogsKeyArnOutput:
+    Value: !GetAtt LogsKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LogsKeyArn'
+
+  SigningKeyArnOutput:
+    Value: !GetAtt SigningKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SigningKeyArn'
+
+  RevocationTableNameOutput:
+    Value: !Ref RevocationTable
+    Export:
+      Name: !Sub '${AWS::StackName}-RevocationTableName'
+
+  KeyProviderSecretArnOutput:
+    Value: !Ref KeyProviderSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-KeyProviderSecretArn'

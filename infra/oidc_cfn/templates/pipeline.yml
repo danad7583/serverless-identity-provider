@@ -1,0 +1,314 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Reusable CodePipeline/CodeBuild/CloudFormation deployment factory. The current
+  OIDC app is the first consumer; future repos can reuse this template by
+  changing source and application injection parameters.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: internal-issuer
+  EnvironmentName:
+    Type: String
+    Default: dev
+
+  FoundationStackName:
+    Type: String
+    Description: Name of the deployed foundation stack exporting artifact/KMS/runtime values.
+  NetworkStackName:
+    Type: String
+    Description: Name of the deployed network stack exporting VPC/subnet/SG/VPCE values.
+
+  ApplicationStackName:
+    Type: String
+    Default: internal-issuer-dev-app
+    Description: CloudFormation stack name for the repo-specific application deployment.
+  ApplicationTemplatePath:
+    Type: String
+    Default: infra/oidc_cfn/templates/app.yml
+    Description: Path to the repo-specific application CloudFormation template in the source artifact.
+  BuildSpecPath:
+    Type: String
+    Default: infra/oidc_cfn/pipeline/buildspec.yml
+    Description: Path to the repo-specific buildspec in the source artifact.
+
+  SourceProvider:
+    Type: String
+    Default: S3
+    AllowedValues:
+      - S3
+      - CodeStarSourceConnection
+    Description: Source provider for the pipeline. Use CodeStarSourceConnection for repo-based pipelines.
+
+  SourceBucketName:
+    Type: String
+    Default: ''
+    Description: Existing external source bucket when SourceProvider is S3. Not created by foundation.
+  SourceObjectKey:
+    Type: String
+    Default: source/latest.zip
+    Description: Source object key when SourceProvider is S3.
+
+  CodeStarConnectionArn:
+    Type: String
+    Default: ''
+    Description: CodeStar Connections ARN when SourceProvider is CodeStarSourceConnection.
+  FullRepositoryId:
+    Type: String
+    Default: ''
+    Description: Repo identifier like owner/repo when SourceProvider is CodeStarSourceConnection.
+  BranchName:
+    Type: String
+    Default: main
+    Description: Branch to deploy when SourceProvider is CodeStarSourceConnection.
+
+  SnapshotPrefix:
+    Type: String
+    Default: snapshots
+    Description: Artifact bucket prefix for optional review snapshots.
+  PackagedPrefix:
+    Type: String
+    Default: packaged
+    Description: Artifact bucket prefix used by aws cloudformation package.
+
+Conditions:
+  UseS3Source: !Equals [!Ref SourceProvider, S3]
+  UseCodeStarSource: !Equals [!Ref SourceProvider, CodeStarSourceConnection]
+
+Resources:
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-pipeline-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pipeline-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codebuild-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  CloudFormationDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-cfn-deploy-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: cfn-deploy-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - ec2:*
+                  - lambda:*
+                  - apigateway:*
+                  - iam:*
+                  - logs:*
+                  - dynamodb:*
+                  - s3:*
+                  - kms:*
+                  - secretsmanager:*
+                Resource: '*'
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-${EnvironmentName}-build'
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET_NAME
+            Type: PLAINTEXT
+            Value:
+              Fn::ImportValue: !Sub '${FoundationStackName}-ArtifactBucketName'
+          - Name: APPLICATION_TEMPLATE_PATH
+            Type: PLAINTEXT
+            Value: !Ref ApplicationTemplatePath
+          - Name: PACKAGED_TEMPLATE_PATH
+            Type: PLAINTEXT
+            Value: build/output/packaged-app.yml
+          - Name: PACKAGED_PREFIX
+            Type: PLAINTEXT
+            Value: !Ref PackagedPrefix
+          - Name: SNAPSHOT_PREFIX
+            Type: PLAINTEXT
+            Value: !Ref SnapshotPrefix
+          - Name: PROJECT_NAME
+            Type: PLAINTEXT
+            Value: !Ref ProjectName
+          - Name: ENVIRONMENT_NAME
+            Type: PLAINTEXT
+            Value: !Ref EnvironmentName
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Ref BuildSpecPath
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${ProjectName}-${EnvironmentName}-pipeline'
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::ImportValue: !Sub '${FoundationStackName}-ArtifactBucketName'
+        EncryptionKey:
+          Id:
+            Fn::ImportValue: !Sub '${FoundationStackName}-ArtifactBucketKeyArn'
+          Type: KMS
+      Stages:
+        - Name: Source
+          Actions:
+            - !If
+              - UseS3Source
+              - Name: SourceFromS3
+                ActionTypeId:
+                  Category: Source
+                  Owner: AWS
+                  Provider: S3
+                  Version: '1'
+                Configuration:
+                  S3Bucket: !Ref SourceBucketName
+                  S3ObjectKey: !Ref SourceObjectKey
+                  PollForSourceChanges: false
+                OutputArtifacts:
+                  - Name: SourceOutput
+                RunOrder: 1
+              - !Ref AWS::NoValue
+            - !If
+              - UseCodeStarSource
+              - Name: SourceFromConnection
+                ActionTypeId:
+                  Category: Source
+                  Owner: AWS
+                  Provider: CodeStarSourceConnection
+                  Version: '1'
+                Configuration:
+                  ConnectionArn: !Ref CodeStarConnectionArn
+                  FullRepositoryId: !Ref FullRepositoryId
+                  BranchName: !Ref BranchName
+                  DetectChanges: true
+                OutputArtifacts:
+                  - Name: SourceOutput
+                RunOrder: 1
+              - !Ref AWS::NoValue
+
+        - Name: Build
+          Actions:
+            - Name: BuildAndPackage
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref BuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+
+        - Name: Deploy
+          Actions:
+            - Name: DeployApplication
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt CloudFormationDeployRole.Arn
+                StackName: !Ref ApplicationStackName
+                Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                TemplatePath: BuildOutput::build/output/packaged-app.yml
+                ParameterOverrides:
+                  Fn::Sub:
+                    - |
+                      {
+                        "ProjectName": "${ProjectName}",
+                        "EnvironmentName": "${EnvironmentName}",
+                        "VpcId": "${VpcId}",
+                        "PrivateSubnetIds": "${PrivateSubnetIds}",
+                        "ExecuteApiVpcEndpointId": "${ExecuteApiVpcEndpointId}",
+                        "RevocationTableName": "${RevocationTableName}",
+                        "SigningKeyArn": "${SigningKeyArn}",
+                        "KeyProviderSecretArn": "${KeyProviderSecretArn}",
+                        "LambdaSecurityGroupId": "${LambdaSecurityGroupId}"
+                      }
+                    - VpcId:
+                        Fn::ImportValue: !Sub '${NetworkStackName}-VpcId'
+                      PrivateSubnetIds:
+                        Fn::ImportValue: !Sub '${NetworkStackName}-PrivateSubnetIds'
+                      ExecuteApiVpcEndpointId:
+                        Fn::ImportValue: !Sub '${NetworkStackName}-ExecuteApiVpcEndpointId'
+                      RevocationTableName:
+                        Fn::ImportValue: !Sub '${FoundationStackName}-RevocationTableName'
+                      SigningKeyArn:
+                        Fn::ImportValue: !Sub '${FoundationStackName}-SigningKeyArn'
+                      KeyProviderSecretArn:
+                        Fn::ImportValue: !Sub '${FoundationStackName}-KeyProviderSecretArn'
+                      LambdaSecurityGroupId:
+                        Fn::ImportValue: !Sub '${NetworkStackName}-LambdaSecurityGroupId'
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+      RestartExecutionOnUpdate: true
+
+Outputs:
+  PipelineNameOutput:
+    Value: !Ref Pipeline
+    Export:
+      Name: !Sub '${AWS::StackName}-PipelineName'
+
+  BuildProjectNameOutput:
+    Value: !Ref BuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-BuildProjectName'
+
+  CloudFormationDeployRoleArnOutput:
+    Value: !GetAtt CloudFormationDeployRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFormationDeployRoleArn'
