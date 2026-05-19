@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "internal-oidc-starter"
+version = "0.1.0"
+description = "Platform-agnostic OIDC starter with secure revocation design and AWS adapters"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PyJWT>=2.8.0",
+]
+
+[project.optional-dependencies]
+aws = [
+  "boto3>=1.34.0",
+]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
