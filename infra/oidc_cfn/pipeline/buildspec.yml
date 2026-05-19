@@ -32,11 +32,8 @@ phases:
       - rm -f build/output/release/lambda/oidc-api.zip
       - rm -f build/output/release/lambda/revoke.zip
 
-      - cd build/package_common && zip -r ../../output/release/lambda/oidc-api.zip internal_oidc
-      - cd ../../
-
-      - cd build/package_common && zip -r ../../output/release/lambda/revoke.zip internal_oidc
-      - cd ../../
+      - zip -r build/output/release/lambda/oidc-api.zip build/package_common/internal_oidc
+      - zip -r build/output/release/lambda/revoke.zip build/package_common/internal_oidc
 
       - echo "Verifying deployment archives"
 
