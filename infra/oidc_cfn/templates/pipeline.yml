@@ -1,79 +1,51 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  Reusable CodePipeline/CodeBuild/CloudFormation deployment factory. The current
-  OIDC app is the first consumer; future repos can reuse this template by
-  changing source and application injection parameters.
+Description: Reusable GitHub to CodePipeline to CloudFormation deployment factory.
 
 Parameters:
   ProjectName:
     Type: String
-    Default: internal-issuer
+    Default: oidc
+
   EnvironmentName:
     Type: String
     Default: dev
 
   FoundationStackName:
     Type: String
-    Description: Name of the deployed foundation stack exporting artifact/KMS/runtime values.
+
   NetworkStackName:
     Type: String
-    Description: Name of the deployed network stack exporting VPC/subnet/SG/VPCE values.
 
   ApplicationStackName:
     Type: String
-    Default: internal-issuer-dev-app
-    Description: CloudFormation stack name for the repo-specific application deployment.
+    Default: oidc-app-dev
+
   ApplicationTemplatePath:
     Type: String
     Default: infra/oidc_cfn/templates/app.yml
-    Description: Path to the repo-specific application CloudFormation template in the source artifact.
+
   BuildSpecPath:
     Type: String
     Default: infra/oidc_cfn/pipeline/buildspec.yml
-    Description: Path to the repo-specific buildspec in the source artifact.
 
-  SourceProvider:
+  ConnectionArn:
     Type: String
-    Default: S3
-    AllowedValues:
-      - S3
-      - CodeStarSourceConnection
-    Description: Source provider for the pipeline. Use CodeStarSourceConnection for repo-based pipelines.
 
-  SourceBucketName:
+  RepositoryId:
     Type: String
-    Default: ''
-    Description: Existing external source bucket when SourceProvider is S3. Not created by foundation.
-  SourceObjectKey:
-    Type: String
-    Default: source/latest.zip
-    Description: Source object key when SourceProvider is S3.
+    Description: GitHub repo in owner/repo format.
 
-  CodeStarConnectionArn:
-    Type: String
-    Default: ''
-    Description: CodeStar Connections ARN when SourceProvider is CodeStarSourceConnection.
-  FullRepositoryId:
-    Type: String
-    Default: ''
-    Description: Repo identifier like owner/repo when SourceProvider is CodeStarSourceConnection.
   BranchName:
     Type: String
     Default: main
-    Description: Branch to deploy when SourceProvider is CodeStarSourceConnection.
 
   SnapshotPrefix:
     Type: String
     Default: snapshots
-    Description: Artifact bucket prefix for optional review snapshots.
+
   PackagedPrefix:
     Type: String
     Default: packaged
-    Description: Artifact bucket prefix used by aws cloudformation package.
-
-Conditions:
-  UseS3Source: !Equals [!Ref SourceProvider, S3]
-  UseCodeStarSource: !Equals [!Ref SourceProvider, CodeStarSourceConnection]
 
 Resources:
   PipelineRole:
@@ -153,6 +125,9 @@ Resources:
       ServiceRole: !GetAtt CodeBuildRole.Arn
       Artifacts:
         Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Ref BuildSpecPath
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
         Image: aws/codebuild/standard:7.0
@@ -180,9 +155,6 @@ Resources:
           - Name: ENVIRONMENT_NAME
             Type: PLAINTEXT
             Value: !Ref EnvironmentName
-      Source:
-        Type: CODEPIPELINE
-        BuildSpec: !Ref BuildSpecPath
 
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
@@ -200,39 +172,21 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            - !If
-              - UseS3Source
-              - Name: SourceFromS3
-                ActionTypeId:
-                  Category: Source
-                  Owner: AWS
-                  Provider: S3
-                  Version: '1'
-                Configuration:
-                  S3Bucket: !Ref SourceBucketName
-                  S3ObjectKey: !Ref SourceObjectKey
-                  PollForSourceChanges: false
-                OutputArtifacts:
-                  - Name: SourceOutput
-                RunOrder: 1
-              - !Ref AWS::NoValue
-            - !If
-              - UseCodeStarSource
-              - Name: SourceFromConnection
-                ActionTypeId:
-                  Category: Source
-                  Owner: AWS
-                  Provider: CodeStarSourceConnection
-                  Version: '1'
-                Configuration:
-                  ConnectionArn: !Ref CodeStarConnectionArn
-                  FullRepositoryId: !Ref FullRepositoryId
-                  BranchName: !Ref BranchName
-                  DetectChanges: true
-                OutputArtifacts:
-                  - Name: SourceOutput
-                RunOrder: 1
-              - !Ref AWS::NoValue
+            - Name: SourceFromGitHub
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref ConnectionArn
+                FullRepositoryId: !Ref RepositoryId
+                BranchName: !Ref BranchName
+                OutputArtifactFormat: CODE_ZIP
+                DetectChanges: true
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
 
         - Name: Build
           Actions:
