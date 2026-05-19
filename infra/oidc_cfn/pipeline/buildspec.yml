@@ -26,13 +26,13 @@ phases:
       - cd "$CODEBUILD_SRC_DIR"
       - SOURCE_VERSION="${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}"
       - SAFE_SOURCE_VERSION="$(echo "$SOURCE_VERSION" | tr -c 'A-Za-z0-9._-' '-')"
-      - PACKAGE_PREFIX="${PACKAGED_PREFIX:-packaged}/${PROJECT_NAME}/${ENVIRONMENT_NAME}/${SAFE_SOURCE_VERSION}"
+      - PACKAGED_PREFIX="${PACKAGED_PREFIX:-packaged}/${PROJECT_NAME}/${ENVIRONMENT_NAME}/${SAFE_SOURCE_VERSION}"
       - SNAPSHOT_DEST="s3://${ARTIFACT_BUCKET_NAME}/${SNAPSHOT_PREFIX:-snapshots}/${PROJECT_NAME}/${ENVIRONMENT_NAME}/${SAFE_SOURCE_VERSION}/"
       - |
         aws cloudformation package \
           --template-file "${APPLICATION_TEMPLATE_PATH}" \
           --s3-bucket "${ARTIFACT_BUCKET_NAME}" \
-          --s3-prefix "${PACKAGE_PREFIX}" \
+          --s3-prefix "${PACKAGED_PREFIX}" \
           --output-template-file "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
       - mkdir -p build/output/review
       - cp "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}" build/output/review/packaged-app.yml
