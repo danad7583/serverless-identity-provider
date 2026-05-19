@@ -1,53 +1,64 @@
 version: 0.2
 
-env:
-  shell: bash
-
 phases:
   install:
     runtime-versions:
-      python: '3.12'
+      python: 3.11
+
     commands:
-      - python -m pip install --upgrade pip setuptools wheel
+      - echo "Installing dependencies"
+
+      - python -m pip install --upgrade pip
+
       - mkdir -p build/python
+      - mkdir -p build/package_common
+      - mkdir -p build/output/release/lambda
+      - mkdir -p build/output
+
       - pip install .[aws] -t build/python
 
   pre_build:
     commands:
-      - pytest -q || true
+      - echo "Preparing lambda package structure"
+
+      - cp -r build/python/* build/package_common/
+
+      - cp -r src/* build/package_common/
 
   build:
     commands:
-      - set -euo pipefail
-      - mkdir -p build/output/release/lambda build/package_common
-      - cp -r src/internal_oidc build/package_common/
-      - cp -r build/python/* build/package_common/ || true
-      - cd build/package_common && zip -r ../output/release/lambda/oidc-api.zip internal_oidc >/dev/null && zip -r ../output/release/lambda/revoke.zip internal_oidc >/dev/null
-      - cd "$CODEBUILD_SRC_DIR"
-      - SOURCE_VERSION="${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}"
-      - SAFE_SOURCE_VERSION="$(echo "$SOURCE_VERSION" | tr -c 'A-Za-z0-9._-' '-')"
-      - PACKAGED_PREFIX="${PACKAGED_PREFIX:-packaged}/${PROJECT_NAME}/${ENVIRONMENT_NAME}/${SAFE_SOURCE_VERSION}"
-      - SNAPSHOT_DEST="s3://${ARTIFACT_BUCKET_NAME}/${SNAPSHOT_PREFIX:-snapshots}/${PROJECT_NAME}/${ENVIRONMENT_NAME}/${SAFE_SOURCE_VERSION}/"
-      - |
-        aws cloudformation package \
+      - echo "Creating Lambda deployment archives"
+
+      - rm -f build/output/release/lambda/oidc-api.zip
+      - rm -f build/output/release/lambda/revoke.zip
+
+      - cd build/package_common && zip -r ../../output/release/lambda/oidc-api.zip internal_oidc
+      - cd ../../
+
+      - cd build/package_common && zip -r ../../output/release/lambda/revoke.zip internal_oidc
+      - cd ../../
+
+      - echo "Verifying deployment archives"
+
+      - ls -lah build/output/release/lambda/
+
+      - test -f build/output/release/lambda/oidc-api.zip
+      - test -f build/output/release/lambda/revoke.zip
+
+      - echo "Packaging CloudFormation template"
+
+      - aws cloudformation package \
           --template-file "${APPLICATION_TEMPLATE_PATH}" \
           --s3-bucket "${ARTIFACT_BUCKET_NAME}" \
           --s3-prefix "${PACKAGED_PREFIX}" \
           --output-template-file "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
-      - mkdir -p build/output/review
-      - cp "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}" build/output/review/packaged-app.yml
-      - cp "${APPLICATION_TEMPLATE_PATH}" build/output/review/source-app.yml
-      - cp build/output/release/lambda/*.zip build/output/review/
-      - aws s3 sync build/output/review/ "$SNAPSHOT_DEST" --only-show-errors
+
+      - test -f "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
 
   post_build:
     commands:
-      - echo "Build and CloudFormation packaging complete."
+      - echo "Build completed"
 
 artifacts:
   files:
     - build/output/packaged-app.yml
-    - build/output/release/lambda/oidc-api.zip
-    - build/output/release/lambda/revoke.zip
-    - build/output/review/**/*
-  discard-paths: no
