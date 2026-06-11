@@ -44,10 +44,10 @@ phases:
 
       - echo "Packaging CloudFormation template"
 
-      - aws cloudformation package \
-          --template-file "${APPLICATION_TEMPLATE_PATH}" \
-          --s3-bucket "${ARTIFACT_BUCKET_NAME}" \
-          --s3-prefix "${PACKAGED_PREFIX}" \
+      - aws cloudformation package
+          --template-file "${APPLICATION_TEMPLATE_PATH}"
+          --s3-bucket "${ARTIFACT_BUCKET_NAME}"
+          --s3-prefix "${PACKAGED_PREFIX}"
           --output-template-file "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
 
       - test -f "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
