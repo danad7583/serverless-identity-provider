@@ -4,52 +4,35 @@ phases:
   install:
     runtime-versions:
       python: 3.11
-
     commands:
       - echo "Installing dependencies"
-
       - python -m pip install --upgrade pip
-
       - mkdir -p build/python
       - mkdir -p build/package_common
       - mkdir -p build/output/release/lambda
       - mkdir -p build/output
-
       - pip install .[aws] -t build/python
 
   pre_build:
     commands:
       - echo "Preparing lambda package structure"
-
       - cp -r build/python/* build/package_common/
-
       - cp -r src/* build/package_common/
 
   build:
     commands:
       - echo "Creating Lambda deployment archives"
-
       - rm -f build/output/release/lambda/oidc-api.zip
       - rm -f build/output/release/lambda/revoke.zip
-
-      - zip -r build/output/release/lambda/oidc-api.zip build/package_common/internal_oidc
-      - zip -r build/output/release/lambda/revoke.zip build/package_common/internal_oidc
-
+      - cd build/package_common && zip -r ../output/release/lambda/oidc-api.zip internal_oidc && cd -
+      - cd build/package_common && zip -r ../output/release/lambda/revoke.zip internal_oidc && cd -
       - echo "Verifying deployment archives"
-
       - ls -lah build/output/release/lambda/
-
       - test -f build/output/release/lambda/oidc-api.zip
       - test -f build/output/release/lambda/revoke.zip
-
+      - unzip -l build/output/release/lambda/oidc-api.zip | head -20
       - echo "Packaging CloudFormation template"
-
-      - aws cloudformation package
-          --template-file "${APPLICATION_TEMPLATE_PATH}"
-          --s3-bucket "${ARTIFACT_BUCKET_NAME}"
-          --s3-prefix "${PACKAGED_PREFIX}"
-          --output-template-file "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
-
+      - aws cloudformation package --template-file "${APPLICATION_TEMPLATE_PATH}" --s3-bucket "${ARTIFACT_BUCKET_NAME}" --s3-prefix "${PACKAGED_PREFIX}" --output-template-file "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
       - test -f "${PACKAGED_TEMPLATE_PATH:-build/output/packaged-app.yml}"
 
   post_build:

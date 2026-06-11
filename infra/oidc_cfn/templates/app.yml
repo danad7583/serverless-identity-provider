@@ -98,7 +98,7 @@ Resources:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroupId
         SubnetIds: !Ref PrivateSubnetIds
-      Code: build/output/release/lambda/oidc-api.zip
+      Code: ../../../build/output/release/lambda/oidc-api.zip
       Environment:
         Variables:
           PROJECT_NAME: !Ref ProjectName
@@ -121,7 +121,7 @@ Resources:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroupId
         SubnetIds: !Ref PrivateSubnetIds
-      Code: build/output/release/lambda/revoke.zip
+      Code: ../../../build/output/release/lambda/revoke.zip
       Environment:
         Variables:
           PROJECT_NAME: !Ref ProjectName
