@@ -40,7 +40,7 @@ class RevokeHandler:
             raise ValidationError("Missing token in request body")
         return token
 
-    @staticmethod/
+    @staticmethod
     def _assert_authenticated_revocation_caller(event: dict) -> None:
         principal = event.get("requestContext", {}).get("authorizer", {}).get("principalId")
         if not principal:
