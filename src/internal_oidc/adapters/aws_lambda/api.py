@@ -4,7 +4,7 @@ import boto3
 
 from internal_oidc.core.config import OIDCConfig
 from internal_oidc.handlers import discovery, health, jwks
-from internal_oidc.providers.aws.secrets_manager_key_provider import SecretsManagerKeyProvider
+from internal_oidc.providers.aws.kms_key_provider import KMSKeyProvider
 
 
 def _build_config() -> OIDCConfig:
@@ -38,7 +38,8 @@ def lambda_handler(event: dict, context: dict | None = None) -> dict:
     if method == "GET" and path == "/jwks":
         secret_arn = os.environ["KEY_PROVIDER_SECRET_ARN"]
         secrets_client = boto3.client("secretsmanager")
-        key_provider = SecretsManagerKeyProvider(secret_arn, secrets_client)
+        kms_client = boto3.client("kms")
+        key_provider = KMSKeyProvider(secret_arn, secrets_client, kms_client)
         return jwks.handle(key_provider)
 
     return {"statusCode": 404, "body": '{"error":"not_found"}'}
